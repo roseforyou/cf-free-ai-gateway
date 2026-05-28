@@ -1,5 +1,6 @@
 import { AURA_VOICES, MODELS, resolveModel } from "./models";
 import { renderHome } from "./ui";
+import { BUILD_API_KEY } from "./generated-config";
 
 export interface Env {
   AI: Ai;
@@ -17,6 +18,10 @@ function corsHeaders() {
     "access-control-allow-headers": "authorization, content-type",
     "access-control-allow-methods": "GET,POST,OPTIONS"
   };
+}
+
+function getApiKey(env: Env): string {
+  return env.API_KEY || BUILD_API_KEY || "";
 }
 
 function json(data: unknown, status = 200): Response {
@@ -43,9 +48,10 @@ function unauthorized() {
 }
 
 function checkAuth(request: Request, env: Env): boolean {
-  if (!env.API_KEY) return false;
+  const apiKey = getApiKey(env);
+  if (!apiKey) return false;
   const auth = request.headers.get("authorization") || "";
-  return auth === `Bearer ${env.API_KEY}`;
+  return auth === `Bearer ${apiKey}`;
 }
 
 async function readJson<T = any>(request: Request): Promise<T> {
@@ -237,7 +243,8 @@ export default {
       return json({
         ok: true,
         name: "cf-free-ai-gateway",
-        authConfigured: Boolean(env.API_KEY),
+        authConfigured: Boolean(getApiKey(env)),
+        authSource: env.API_KEY ? "runtime" : BUILD_API_KEY ? "build" : "none",
         routes: [
           "GET /",
           "GET /health",
