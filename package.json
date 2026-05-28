@@ -1,0 +1,27 @@
+{
+  "name": "cf-free-ai-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenAI-compatible gateway for Cloudflare Workers AI with a built-in web console.",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types",
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260524.0",
+    "typescript": "^5.8.3",
+    "wrangler": "^4.18.0"
+  },
+  "keywords": [
+    "cloudflare",
+    "workers-ai",
+    "openai-compatible",
+    "tts",
+    "stt",
+    "kelivo"
+  ],
+  "license": "MIT"
+}
