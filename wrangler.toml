@@ -1,0 +1,9 @@
+name = "cf-free-ai-gateway"
+main = "src/index.ts"
+compatibility_date = "2026-05-28"
+
+[ai]
+binding = "AI"
+
+# After deployment, set an environment variable in Cloudflare:
+# API_KEY = "your-secret-token"
