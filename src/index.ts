@@ -39,11 +39,11 @@ function html(markup: string): Response {
 }
 
 function unauthorized() {
-  return json({ error: { message: "Unauthorized", type: "auth_error" } }, 401);
+  return json({ error: { message: "Unauthorized or API_KEY is not configured", type: "auth_error" } }, 401);
 }
 
 function checkAuth(request: Request, env: Env): boolean {
-  if (!env.API_KEY) return true;
+  if (!env.API_KEY) return false;
   const auth = request.headers.get("authorization") || "";
   return auth === `Bearer ${env.API_KEY}`;
 }
@@ -237,6 +237,7 @@ export default {
       return json({
         ok: true,
         name: "cf-free-ai-gateway",
+        authConfigured: Boolean(env.API_KEY),
         routes: [
           "GET /",
           "GET /health",
