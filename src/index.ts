@@ -1,6 +1,7 @@
 import { AURA_VOICES, MODELS, resolveModel } from "./models";
 import { renderHome } from "./ui";
 import { BUILD_API_KEY } from "./generated-config";
+import { CATALOG_INFO, TTS_INFO, extractCfModelIds, pickInterestingModels } from "./catalog";
 
 export interface Env {
   AI: Ai;
@@ -29,6 +30,7 @@ function json(data: unknown, status = 200): Response {
     status,
     headers: {
       "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
       ...corsHeaders()
     }
   });
@@ -64,6 +66,38 @@ async function readJson<T = any>(request: Request): Promise<T> {
 
 function normalizeMessages(messages: ChatMessage[] = []) {
   return messages.map((m) => ({ role: m.role, content: m.content }));
+}
+
+async function handleLatestModels(): Promise<Response> {
+  const source = CATALOG_INFO.pricingUrl;
+  try {
+    const res = await fetch(source, {
+      headers: { accept: "text/plain, text/markdown, text/html" }
+    });
+    const text = await res.text();
+    const ids = extractCfModelIds(text);
+    const grouped = pickInterestingModels(ids);
+
+    return json({
+      ok: true,
+      source,
+      fetchedAt: new Date().toISOString(),
+      total: ids.length,
+      freeTier: CATALOG_INFO,
+      grouped,
+      all: ids
+    });
+  } catch (error) {
+    return json({
+      ok: false,
+      source,
+      error: String(error),
+      fallback: {
+        freeTier: CATALOG_INFO,
+        models: MODELS
+      }
+    }, 502);
+  }
 }
 
 async function handleChat(request: Request, env: Env): Promise<Response> {
@@ -121,11 +155,18 @@ async function handleEmbeddings(request: Request, env: Env): Promise<Response> {
   });
 }
 
+function pickTtsSpeaker(model: string, requested?: string): string {
+  if (requested) return requested;
+  if (model.includes("aura-2-es")) return TTS_INFO.aura2SpanishDefaultVoice;
+  if (model.includes("aura-2-en")) return TTS_INFO.aura2EnglishDefaultVoice;
+  return "angus";
+}
+
 async function handleSpeech(request: Request, env: Env): Promise<Response> {
   const body = await readJson(request);
   const model = resolveModel(body.model, "tts");
   const input = body.input || body.text || "";
-  const voice = AURA_VOICES.includes(body.voice) ? body.voice : "angus";
+  const voice = pickTtsSpeaker(model, body.voice);
   const format = body.response_format || body.format || "mp3";
 
   if (!input) {
@@ -249,6 +290,8 @@ export default {
           "GET /",
           "GET /health",
           "GET /v1/models",
+          "GET /cf/tts-guide",
+          "GET /cf/models/latest",
           "POST /v1/chat/completions",
           "POST /v1/embeddings",
           "POST /v1/audio/speech",
@@ -259,11 +302,19 @@ export default {
       });
     }
 
-    if (!checkAuth(request, env)) return unauthorized();
-
     if (url.pathname === "/v1/models" && request.method === "GET") {
-      return json({ object: "list", data: MODELS });
+      return json({ object: "list", data: MODELS, freeTier: CATALOG_INFO, tts: TTS_INFO });
     }
+
+    if (url.pathname === "/cf/tts-guide" && request.method === "GET") {
+      return json({ ok: true, freeTier: CATALOG_INFO, tts: TTS_INFO });
+    }
+
+    if (url.pathname === "/cf/models/latest" && request.method === "GET") {
+      return handleLatestModels();
+    }
+
+    if (!checkAuth(request, env)) return unauthorized();
 
     if (url.pathname === "/v1/chat/completions" && request.method === "POST") {
       return handleChat(request, env);
