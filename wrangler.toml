@@ -1,4 +1,4 @@
-name = "cf-free-ai-gateway"
+name = "cf-free-ai-gateway-v2"
 main = "src/index.ts"
 compatibility_date = "2026-05-28"
 
