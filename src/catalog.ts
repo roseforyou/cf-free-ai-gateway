@@ -7,8 +7,15 @@ export const CATALOG_INFO = {
 };
 
 export const TTS_INFO = {
-  defaultModel: "@cf/deepgram/aura-1",
+  defaultModel: "@cf/myshell-ai/melotts",
   kelivoModel: "tts-1",
+  recommendation: "Default is MeloTTS (cheapest TTS, supports Chinese via lang=zh). Use model=aura-1 only for premium English/Spanish.",
+  neuronCostPerUnit: {
+    melotts: "18.63 neurons / audio minute",
+    whisper: "41.14 neurons / audio minute",
+    auraOne: "1363.64 neurons / 1k characters (~70x MeloTTS)"
+  },
+  melottsLangs: ["zh", "en", "es", "fr", "ja", "ko"],
   aura1Price: "$0.015 / 1k characters",
   aura2Price: "$0.030 / 1k characters",
   melottsPrice: "$0.0002 / audio minute",

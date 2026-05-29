@@ -1,6 +1,5 @@
-import { AURA_VOICES, MODELS, resolveModel } from "./models";
+import { MODELS, resolveModel } from "./models";
 import { renderHome } from "./ui";
-import { BUILD_API_KEY } from "./generated-config";
 import { CATALOG_INFO, TTS_INFO, extractCfModelIds, pickInterestingModels } from "./catalog";
 
 export interface Env {
@@ -22,7 +21,7 @@ function corsHeaders() {
 }
 
 function getApiKey(env: Env): string {
-  return env.API_KEY || BUILD_API_KEY || "";
+  return env.API_KEY || "";
 }
 
 function json(data: unknown, status = 200): Response {
@@ -104,12 +103,71 @@ async function handleChat(request: Request, env: Env): Promise<Response> {
   const body = await readJson(request);
   const model = resolveModel(body.model, "chat");
   const messages = normalizeMessages(body.messages || []);
+  const wantStream = body.stream === true;
+  const id = `chatcmpl-${crypto.randomUUID()}`;
+  const created = Math.floor(Date.now() / 1000);
 
-  const result: any = await env.AI.run(model as any, {
-    messages,
-    stream: false
-  });
+  // ---- 流式（SSE）：把 Cloudflare 的 data:{"response":...} 转成 OpenAI chunk ----
+  if (wantStream) {
+    const upstream: any = await env.AI.run(model as any, { messages, stream: true });
+    const encoder = new TextEncoder();
+    const decoder = new TextDecoder();
 
+    const sse = (payload: unknown) => encoder.encode(`data: ${JSON.stringify(payload)}\n\n`);
+    const chunk = (delta: object, finish: string | null) => ({
+      id,
+      object: "chat.completion.chunk",
+      created,
+      model,
+      choices: [{ index: 0, delta, finish_reason: finish }]
+    });
+
+    const transformed = new ReadableStream({
+      async start(controller) {
+        const reader = (upstream as ReadableStream).getReader();
+        let buffer = "";
+        controller.enqueue(sse(chunk({ role: "assistant" }, null)));
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop() || "";
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (!trimmed.startsWith("data:")) continue;
+              const data = trimmed.slice(5).trim();
+              if (!data || data === "[DONE]") continue;
+              try {
+                const token = JSON.parse(data)?.response ?? "";
+                if (token) controller.enqueue(sse(chunk({ content: token }, null)));
+              } catch {
+                // 忽略非 JSON 的 keep-alive 行
+              }
+            }
+          }
+          controller.enqueue(sse(chunk({}, "stop")));
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        } catch (err) {
+          controller.enqueue(sse({ error: { message: String(err), type: "stream_error" } }));
+        } finally {
+          controller.close();
+        }
+      }
+    });
+
+    return new Response(transformed, {
+      headers: {
+        "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-store",
+        ...corsHeaders()
+      }
+    });
+  }
+
+  // ---- 非流式 ----
+  const result: any = await env.AI.run(model as any, { messages, stream: false });
   const text =
     result?.response ??
     result?.result?.response ??
@@ -117,22 +175,18 @@ async function handleChat(request: Request, env: Env): Promise<Response> {
     "";
 
   return json({
-    id: `chatcmpl-${crypto.randomUUID()}`,
+    id,
     object: "chat.completion",
-    created: Math.floor(Date.now() / 1000),
+    created,
     model,
     choices: [
       {
         index: 0,
-        message: {
-          role: "assistant",
-          content: text
-        },
+        message: { role: "assistant", content: text },
         finish_reason: "stop"
       }
     ],
-    usage: result?.usage ?? undefined,
-    raw: result
+    usage: result?.usage ?? undefined
   });
 }
 
@@ -162,32 +216,50 @@ function pickTtsSpeaker(model: string, requested?: string): string {
   return "angus";
 }
 
+// 含中/日/韩等字符时，Aura 无法正确发音，需要走 MeloTTS
+function hasCjk(text: string): boolean {
+  return /[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(text);
+}
+
+// base64 -> 二进制（Workers 运行时内置 atob）
+function base64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
 async function handleSpeech(request: Request, env: Env): Promise<Response> {
   const body = await readJson(request);
-  const model = resolveModel(body.model, "tts");
   const input = body.input || body.text || "";
-  const voice = pickTtsSpeaker(model, body.voice);
   const format = body.response_format || body.format || "mp3";
 
   if (!input) {
     return json({ error: { message: "Missing input text" } }, 400);
   }
 
-  const result: any = await env.AI.run(
-    model as any,
-    {
-      text: input,
-      speaker: voice,
-      encoding: format
-    },
-    {
-      returnRawResponse: true
-    } as any
-  );
+  // 默认解析到 MeloTTS（FALLBACK.tts）；只有显式 model=aura-1 / tts-aura 才得到 Aura
+  const model = resolveModel(body.model, "tts");
+  const explicitLang = (body.lang || body.language || "").toString();
 
-  if (result instanceof Response) {
-    return new Response(result.body, {
-      status: result.status,
+  // ---- Deepgram Aura 路径（仅显式指定；英/西语，质量高但烧额度）----
+  if (model.includes("aura")) {
+    const voice = pickTtsSpeaker(model, body.voice);
+    const result: any = await env.AI.run(
+      model as any,
+      { text: input, speaker: voice, encoding: format },
+      { returnRawResponse: true } as any
+    );
+    if (result instanceof Response) {
+      return new Response(result.body, {
+        status: result.status,
+        headers: {
+          "content-type": format === "wav" ? "audio/wav" : "audio/mpeg",
+          ...corsHeaders()
+        }
+      });
+    }
+    return new Response(result?.body ?? result, {
       headers: {
         "content-type": format === "wav" ? "audio/wav" : "audio/mpeg",
         ...corsHeaders()
@@ -195,13 +267,26 @@ async function handleSpeech(request: Request, env: Env): Promise<Response> {
     });
   }
 
-  return new Response(result?.body ?? result, {
-    headers: {
-      "content-type": format === "wav" ? "audio/wav" : "audio/mpeg",
-      ...corsHeaders()
-    }
+  // ---- MeloTTS 路径（默认；省额度 + 支持中文）----
+  // lang 优先级：显式 lang/language > 文本含 CJK 自动选 zh，否则 en
+  // 注意：若中文无声，把下面的 "zh" 改成 "ZH" 再试（取决于 CF 后端大小写处理）
+  const lang = explicitLang
+    ? explicitLang.slice(0, 2).toLowerCase()
+    : (hasCjk(input) ? "zh" : "en");
+  const result: any = await env.AI.run("@cf/myshell-ai/melotts" as any, {
+    prompt: input,
+    lang
+  });
+  const b64: string = result?.audio ?? result?.result?.audio ?? "";
+  if (!b64) {
+    return json({ error: { message: "MeloTTS returned no audio", raw: result } }, 502);
+  }
+  return new Response(base64ToBytes(b64), {
+    headers: { "content-type": "audio/mpeg", ...corsHeaders() }
   });
 }
+
+const MAX_AUDIO_BYTES = 25 * 1024 * 1024; // 25MB，Whisper 输入上限的保守值
 
 async function handleTranscription(request: Request, env: Env): Promise<Response> {
   const contentType = request.headers.get("content-type") || "";
@@ -223,12 +308,21 @@ async function handleTranscription(request: Request, env: Env): Promise<Response
     return json({ error: { message: "Missing file field" } }, 400);
   }
 
+  // 大文件保护：在读进内存前先拦截，避免 [...Uint8Array] 内存翻倍触发 Worker 128MB 上限
+  if (file.size > MAX_AUDIO_BYTES) {
+    return json({
+      error: {
+        message: `Audio too large (${(file.size / 1048576).toFixed(1)}MB). Max ${MAX_AUDIO_BYTES / 1048576}MB.`,
+        type: "payload_too_large"
+      }
+    }, 413);
+  }
+
   const audio = [...new Uint8Array(await file.arrayBuffer())];
   const result: any = await env.AI.run(model as any, { audio });
 
   return json({
-    text: result?.text ?? result?.result?.text ?? result?.transcription ?? "",
-    raw: result
+    text: result?.text ?? result?.result?.text ?? result?.transcription ?? ""
   });
 }
 
@@ -250,8 +344,7 @@ async function handleImage(request: Request, env: Env): Promise<Response> {
 
   return json({
     created: Math.floor(Date.now() / 1000),
-    data: [{ b64_json: imageBase64 }],
-    raw: result
+    data: [{ b64_json: imageBase64 }]
   });
 }
 
@@ -270,76 +363,84 @@ async function handleRawRun(request: Request, env: Env, pathname: string): Promi
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
+    try {
+      const url = new URL(request.url);
 
-    if (request.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders() });
+      if (request.method === "OPTIONS") {
+        return new Response(null, { headers: corsHeaders() });
+      }
+
+      if (url.pathname === "/" && request.method === "GET") {
+        return html(renderHome(url.origin));
+      }
+
+      if (url.pathname === "/health") {
+        return json({
+          ok: true,
+          name: "cf-free-ai-gateway",
+          authConfigured: Boolean(getApiKey(env)),
+          authSource: env.API_KEY ? "runtime" : "none",
+          routes: [
+            "GET /",
+            "GET /health",
+            "GET /v1/models",
+            "GET /cf/tts-guide",
+            "GET /cf/models/latest",
+            "POST /v1/chat/completions",
+            "POST /v1/embeddings",
+            "POST /v1/audio/speech",
+            "POST /v1/audio/transcriptions",
+            "POST /v1/images/generations",
+            "POST /cf/run/:model"
+          ]
+        });
+      }
+
+      if (url.pathname === "/v1/models" && request.method === "GET") {
+        return json({ object: "list", data: MODELS, freeTier: CATALOG_INFO, tts: TTS_INFO });
+      }
+
+      if (url.pathname === "/cf/tts-guide" && request.method === "GET") {
+        return json({ ok: true, freeTier: CATALOG_INFO, tts: TTS_INFO });
+      }
+
+      if (url.pathname === "/cf/models/latest" && request.method === "GET") {
+        return handleLatestModels();
+      }
+
+      if (!checkAuth(request, env)) return unauthorized();
+
+      if (url.pathname === "/v1/chat/completions" && request.method === "POST") {
+        return handleChat(request, env);
+      }
+
+      if (url.pathname === "/v1/embeddings" && request.method === "POST") {
+        return handleEmbeddings(request, env);
+      }
+
+      if (url.pathname === "/v1/audio/speech" && request.method === "POST") {
+        return handleSpeech(request, env);
+      }
+
+      if (url.pathname === "/v1/audio/transcriptions" && request.method === "POST") {
+        return handleTranscription(request, env);
+      }
+
+      if (url.pathname === "/v1/images/generations" && request.method === "POST") {
+        return handleImage(request, env);
+      }
+
+      if (url.pathname.startsWith("/cf/run/") && request.method === "POST") {
+        return handleRawRun(request, env, url.pathname);
+      }
+
+      return json({ error: { message: "Not found", type: "not_found" } }, 404);
+    } catch (err: any) {
+      // 统一兜底：模型调用失败、JSON 解析异常等都在这里转成 OpenAI 风格错误
+      return json(
+        { error: { message: String(err?.message ?? err), type: "internal_error" } },
+        500
+      );
     }
-
-    if (url.pathname === "/" && request.method === "GET") {
-      return html(renderHome(url.origin));
-    }
-
-    if (url.pathname === "/health") {
-      return json({
-        ok: true,
-        name: "cf-free-ai-gateway",
-        authConfigured: Boolean(getApiKey(env)),
-        authSource: env.API_KEY ? "runtime" : BUILD_API_KEY ? "build" : "none",
-        routes: [
-          "GET /",
-          "GET /health",
-          "GET /v1/models",
-          "GET /cf/tts-guide",
-          "GET /cf/models/latest",
-          "POST /v1/chat/completions",
-          "POST /v1/embeddings",
-          "POST /v1/audio/speech",
-          "POST /v1/audio/transcriptions",
-          "POST /v1/images/generations",
-          "POST /cf/run/:model"
-        ]
-      });
-    }
-
-    if (url.pathname === "/v1/models" && request.method === "GET") {
-      return json({ object: "list", data: MODELS, freeTier: CATALOG_INFO, tts: TTS_INFO });
-    }
-
-    if (url.pathname === "/cf/tts-guide" && request.method === "GET") {
-      return json({ ok: true, freeTier: CATALOG_INFO, tts: TTS_INFO });
-    }
-
-    if (url.pathname === "/cf/models/latest" && request.method === "GET") {
-      return handleLatestModels();
-    }
-
-    if (!checkAuth(request, env)) return unauthorized();
-
-    if (url.pathname === "/v1/chat/completions" && request.method === "POST") {
-      return handleChat(request, env);
-    }
-
-    if (url.pathname === "/v1/embeddings" && request.method === "POST") {
-      return handleEmbeddings(request, env);
-    }
-
-    if (url.pathname === "/v1/audio/speech" && request.method === "POST") {
-      return handleSpeech(request, env);
-    }
-
-    if (url.pathname === "/v1/audio/transcriptions" && request.method === "POST") {
-      return handleTranscription(request, env);
-    }
-
-    if (url.pathname === "/v1/images/generations" && request.method === "POST") {
-      return handleImage(request, env);
-    }
-
-    if (url.pathname.startsWith("/cf/run/") && request.method === "POST") {
-      return handleRawRun(request, env, url.pathname);
-    }
-
-    return json({ error: { message: "Not found" } }, 404);
   }
 };

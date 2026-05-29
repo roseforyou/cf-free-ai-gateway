@@ -48,12 +48,20 @@ export const MODELS: ModelInfo[] = [
     description: "Base English embedding model."
   },
   {
+    id: "@cf/myshell-ai/melotts",
+    object: "model",
+    owned_by: "cloudflare",
+    kind: "tts",
+    alias: ["tts-1", "tts-1-hd", "tts-default", "melotts", "tts-zh", "tts-ml"],
+    description: "MeloTTS multilingual TTS (DEFAULT). Cheapest TTS (~18.63 neurons/min). Supports Chinese (lang=zh) and English."
+  },
+  {
     id: "@cf/deepgram/aura-1",
     object: "model",
     owned_by: "cloudflare",
     kind: "tts",
-    alias: ["tts-1", "tts-1-hd", "tts-default"],
-    description: "Deepgram Aura text-to-speech model."
+    alias: ["tts-aura", "aura", "aura-1"],
+    description: "Deepgram Aura TTS. English/Spanish only, premium quality but ~70x more neurons than MeloTTS. Use only when explicitly requested."
   },
   {
     id: "@cf/openai/whisper",
@@ -90,7 +98,7 @@ export const MODELS: ModelInfo[] = [
 const FALLBACK: Record<ModelKind, string> = {
   chat: "@cf/meta/llama-3.1-8b-instruct-fast",
   embedding: "@cf/baai/bge-small-en-v1.5",
-  tts: "@cf/deepgram/aura-1",
+  tts: "@cf/myshell-ai/melotts",
   stt: "@cf/openai/whisper",
   image: "@cf/black-forest-labs/flux-1-schnell",
   translate: "@cf/meta/m2m100-1.2b",
